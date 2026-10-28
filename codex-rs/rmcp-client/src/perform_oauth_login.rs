@@ -281,6 +281,114 @@ pub async fn perform_oauth_login_return_url(
     Ok(OauthLoginHandle::new(authorization_url, completion))
 }
 
+const OAUTH_CALLBACK_SUCCESS_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Slaunt MCP OAuth</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Neue Haas Display", "Geist", Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #d4d4d8;
+        background: #020306;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        display: grid;
+        min-height: 100vh;
+        margin: 0;
+        padding: 24px;
+        place-items: center;
+        background: radial-gradient(1200px 600px at 90% 10%, #152f7a 0%, #07090f 45%, #020306 100%);
+      }
+
+      main {
+        width: min(540px, 100%);
+        padding: 32px;
+        border: 1px solid #27272a;
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(16, 17, 20, .96), rgba(10, 11, 13, .98));
+        box-shadow: 0 40px 90px rgba(0, 0, 0, .55);
+        text-align: center;
+      }
+
+      .eyebrow {
+        margin: 0 0 24px;
+        color: #71717a;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: .18em;
+        text-transform: uppercase;
+      }
+
+      .success-mark {
+        display: grid;
+        width: 52px;
+        height: 52px;
+        margin: 0 auto 20px;
+        place-items: center;
+        border: 1px solid rgba(134, 239, 172, .32);
+        border-radius: 50%;
+        background: rgba(20, 83, 45, .25);
+        color: #bbf7d0;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        color: #fafafa;
+        font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
+        font-size: clamp(34px, 8vw, 44px);
+        font-weight: 400;
+        line-height: 1.04;
+      }
+
+      .message {
+        margin: 0;
+        color: #a1a1aa;
+        font-size: 15px;
+        line-height: 1.6;
+      }
+
+      @media (max-width: 480px) {
+        main { padding: 26px 22px; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          scroll-behavior: auto !important;
+          animation-duration: .01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: .01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main aria-labelledby="completion-title">
+      <p class="eyebrow">Slaunt · OAuth Gateway</p>
+      <div class="success-mark" aria-hidden="true">
+        <svg width="25" height="25" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M5 12.5L9.2 16.5L19 7.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </div>
+      <h1 id="completion-title">Authentication complete.</h1>
+      <p class="message" role="status" aria-live="polite">You may close this window.</p>
+    </main>
+  </body>
+</html>"#;
+
+fn oauth_callback_success_response() -> Response<std::io::Cursor<Vec<u8>>> {
+    Response::from_string(OAUTH_CALLBACK_SUCCESS_PAGE).with_header(
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+            .expect("static OAuth callback content type is valid"),
+    )
+}
+
 fn spawn_callback_server(
     server: Arc<Server>,
     tx: oneshot::Sender<CallbackResult>,
@@ -299,9 +407,7 @@ fn spawn_callback_server(
                     state,
                     issuer,
                 }) => {
-                    let response = Response::from_string(
-                        "Authentication complete. You may close this window.",
-                    );
+                    let response = oauth_callback_success_response();
                     if let Err(err) = request.respond(response) {
                         eprintln!("Failed to respond to OAuth callback: {err}");
                     }
@@ -1426,6 +1532,36 @@ mod tests {
     fn parse_oauth_callback_accepts_default_path() {
         let parsed = parse_oauth_callback("/callback?code=abc&state=xyz", "/callback");
         assert!(matches!(parsed, CallbackOutcome::Success(_)));
+    }
+
+    #[test]
+    fn callback_success_response_is_styled_slaunt_html() {
+        let response = super::oauth_callback_success_response();
+        let content_type = response
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("Content-Type"))
+            .map(|header| header.value.as_str());
+
+        assert_eq!(content_type, Some("text/html; charset=utf-8"));
+
+        let mut html = String::new();
+        response
+            .into_reader()
+            .read_to_string(&mut html)
+            .expect("read OAuth callback page");
+        for expected in [
+            "<!doctype html>",
+            "<style>",
+            "Slaunt · OAuth Gateway",
+            "Authentication complete.",
+            "You may close this window.",
+        ] {
+            assert!(
+                html.contains(expected),
+                "OAuth callback page is missing {expected:?}"
+            );
+        }
     }
 
     #[test]
